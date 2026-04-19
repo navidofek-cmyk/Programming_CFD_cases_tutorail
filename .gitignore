@@ -1,0 +1,10 @@
+*.o
+*.out
+
+01_cavity_case/cavity
+01_cavity_case/run
+01_cavity_case/*.csv
+01_cavity_case/*.vtk
+
+02_laminar_chanell_obstacle/channel_obstacle
+02_laminar_chanell_obstacle/*.csv
