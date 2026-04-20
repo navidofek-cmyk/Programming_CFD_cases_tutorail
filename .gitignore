@@ -9,4 +9,8 @@
 02_laminar_chanell_obstacle/channel_obstacle
 02_laminar_chanell_obstacle/*.csv
 
+03_channel_obstacle_unsteady/channel_obstacle_unsteady
+03_channel_obstacle_unsteady/*.csv
+03_channel_obstacle_unsteady/output/
+
 05_laminar_channel_simple/

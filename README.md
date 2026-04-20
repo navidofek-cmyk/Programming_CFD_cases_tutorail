@@ -1,6 +1,6 @@
 # Programming CFD Cases Tutorial
 
-Small educational CFD cases in modern C++.
+Educational 2D CFD mini-cases in modern C++.
 
 The goal of this repository is to build readable numerical examples step by step:
 
@@ -10,9 +10,15 @@ The goal of this repository is to build readable numerical examples step by step
 - standard library only
 - educational structure rather than production complexity
 
-## Cases
+## Cases Overview
 
-### 01_cavity_case
+| Case | Description | Method | Status |
+|---|---|---|---|
+| `01_cavity_case` | Lid-driven cavity | Finite differences + projection | available |
+| `02_laminar_chanell_obstacle` | Steady channel flow with square obstacle | Cell-centered FVM + SIMPLE-like pseudo-time | available |
+| `03_channel_obstacle_unsteady` | Unsteady channel flow with square obstacle | Cell-centered transient solver + PISO-like corrections | available |
+
+## 01_cavity_case
 
 2D lid-driven cavity flow:
 
@@ -23,9 +29,12 @@ The goal of this repository is to build readable numerical examples step by step
 - CSV export
 - VTK export for ParaView
 
-Good as a first CFD teaching example because the geometry and boundary conditions are simple.
+```bash
+cd 01_cavity_case
+./run.sh
+```
 
-### 02_laminar_chanell_obstacle
+## 02_laminar_chanell_obstacle
 
 2D laminar channel flow with a square obstacle:
 
@@ -43,23 +52,29 @@ This case is intentionally simple and educational. It is useful for studying:
 - wake formation behind a bluff body
 - practical convergence behavior of a simple segregated solver
 
-## Build and Run
-
-Each case has its own local instructions inside its folder.
-
-Typical usage:
-
-```bash
-cd 01_cavity_case
-./run.sh
-```
-
-or:
-
 ```bash
 cd 02_laminar_chanell_obstacle
 make
 ./channel_obstacle
+```
+
+## 03_channel_obstacle_unsteady
+
+Transient companion to the steady obstacle case:
+
+- incompressible laminar Navier-Stokes
+- structured Cartesian mesh with masked square obstacle
+- explicit predictor step with pressure correction
+- PISO-like multiple corrections per time step
+- CSV export for final fields
+- VTK snapshots for ParaView
+
+This case is meant for studying actual wake development in time instead of forcing the obstacle wake into a steady-state interpretation.
+
+```bash
+cd 03_channel_obstacle_unsteady
+make
+./channel_obstacle_unsteady
 ```
 
 ## Notes
