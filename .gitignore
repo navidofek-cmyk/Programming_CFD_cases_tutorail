@@ -22,5 +22,8 @@
 05_laminar_channel_simple/*.csv
 05_laminar_channel_simple/*.vtk
 
+06_exact_riemann_solver_1d_euler/exact_riemann
+06_exact_riemann_solver_1d_euler/*.csv
+
 07_laval_nozzle_quasi_1d/nozzle_solver
 07_laval_nozzle_quasi_1d/*.csv

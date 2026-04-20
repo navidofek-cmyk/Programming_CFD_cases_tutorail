@@ -19,6 +19,7 @@ The goal of this repository is to build readable numerical examples step by step
 | `03_channel_obstacle_unsteady` | Unsteady channel flow with square obstacle | Cell-centered transient solver + PISO-like corrections | available |
 | `04_laminar_channel_obstacle_rebuild` | Rebuilt steady obstacle solver | Staggered MAC-style layout + SIMPLE/SOR | available |
 | `05_laminar_channel_simple` | Simple laminar channel / Poiseuille case | Staggered channel solver | available |
+| `06_exact_riemann_solver_1d_euler` | Exact 1D Euler reference case | Exact Riemann solution | available |
 | `07_laval_nozzle_quasi_1d` | Quasi-1D compressible Laval nozzle | Explicit MacCormack + area source term | available |
 
 ## 01_cavity_case
@@ -107,6 +108,20 @@ Simple laminar channel-flow case intended as a cleaner reference problem:
 cd 05_laminar_channel_simple
 make
 ./channel_flow
+```
+
+## 06_exact_riemann_solver_1d_euler
+
+Reference exact solution for the 1D compressible Euler Riemann problem:
+
+- exact star-region solve for `p*` and `u*`
+- wave-pattern sampling at user-selected time
+- useful as a benchmark for later approximate compressible solvers
+
+```bash
+cd 06_exact_riemann_solver_1d_euler
+make
+./exact_riemann
 ```
 
 ## 07_laval_nozzle_quasi_1d
