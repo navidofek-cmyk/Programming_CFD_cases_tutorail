@@ -30,7 +30,7 @@ double Solver::sound(int i, int j) const {
 void Solver::init(const Mesh& m,
                   double mach_, double aoa_deg_, double gamma_,
                   double cfl_, int max_iter_, double residual_drop_,
-                  int scheme_order_, int output_interval_) {
+                  int scheme_order_, int warmup_iters_, int output_interval_) {
     pmesh           = &m;
     gamma           = gamma_;
     mach            = mach_;
@@ -39,6 +39,7 @@ void Solver::init(const Mesh& m,
     max_iter        = max_iter_;
     residual_drop   = residual_drop_;
     scheme_order    = scheme_order_;
+    warmup_iters    = warmup_iters_;
     output_interval = output_interval_;
 
     nci = m.nc_i();
@@ -109,6 +110,24 @@ void Solver::compute_rhs(std::vector<double>& R, std::vector<double>& dt_cell) c
         p = press(ci, cj);
     };
 
+    // Van Albada limiter: phi(r) = (r²+r)/(r²+1), clamped to [0, ∞)
+    auto phi_va = [](double r) -> double {
+        return r > 0.0 ? (r*r + r) / (r*r + 1.0) : 0.0;
+    };
+
+    // MUSCL reconstruct 1 variable across a face.
+    // bm1, b0, b1, b2 = cells at (m-1, m, m+1, m+2); face is between m and m+1.
+    auto muscl = [&](double bm1, double b0, double b1, double b2,
+                     double& qL, double& qR) {
+        double dl = b0 - bm1;
+        double dc = b1 - b0;
+        double dr = b2 - b1;
+        double rL = (std::abs(dl) > 1e-14) ? dc / dl : 0.0;
+        double rR = (std::abs(dr) > 1e-14) ? dc / dr : 0.0;
+        qL = b0 + 0.5 * phi_va(rL) * dl;
+        qR = b1 - 0.5 * phi_va(rR) * dr;
+    };
+
     // ---- i-direction faces: face i is between cell (i-1,j) [L] and (i,j) [R]
     //      i loops 0..nci  (ni = nci+1 faces total)
     //      ifnx/ifny indexed [j*ni + i]
@@ -120,9 +139,26 @@ void Solver::compute_rhs(std::vector<double>& R, std::vector<double>& dt_cell) c
             double len = m.iflen[j * ni + i];
             if (len < 1e-14) continue;  // skip degenerate faces (wake-exit singularity)
 
+            double rho0, u0, v0, p0, rho1, u1, v1, p1;
+            prim(iL, j, rho0, u0, v0, p0);
+            prim(iR, j, rho1, u1, v1, p1);
+
             double rL, uL, vL, pL, rR, uR, vR, pR;
-            prim(iL, j, rL, uL, vL, pL);
-            prim(iR, j, rR, uR, vR, pR);
+            // MUSCL reconstruction when stencil is available: iL-1 >= -1 and iR+1 <= nci
+            if (scheme_order >= 2 && i >= 1 && i <= nci - 1) {
+                double rhoA, uA, vA, pA, rhoB, uB, vB, pB;
+                prim(iL - 1, j, rhoA, uA, vA, pA);
+                prim(iR + 1, j, rhoB, uB, vB, pB);
+                muscl(rhoA, rho0, rho1, rhoB, rL, rR);
+                muscl(uA,   u0,   u1,   uB,   uL, uR);
+                muscl(vA,   v0,   v1,   vB,   vL, vR);
+                muscl(pA,   p0,   p1,   pB,   pL, pR);
+            } else {
+                rL = rho0; uL = u0; vL = v0; pL = p0;
+                rR = rho1; uR = u1; vR = v1; pR = p1;
+            }
+            rL = std::max(rL, 1e-10); rR = std::max(rR, 1e-10);
+            pL = std::max(pL, 1e-10); pR = std::max(pR, 1e-10);
 
             double F[4];
             roe_flux(rL, uL, vL, pL, rR, uR, vR, pR, nx, ny, gamma, F);
@@ -159,9 +195,26 @@ void Solver::compute_rhs(std::vector<double>& R, std::vector<double>& dt_cell) c
             double len = m.jflen[j * nci + i];
             if (len < 1e-14) continue;  // skip degenerate faces
 
+            double rho0, u0, v0, p0, rho1, u1, v1, p1;
+            prim(i, jL, rho0, u0, v0, p0);
+            prim(i, jR, rho1, u1, v1, p1);
+
             double rL, uL, vL, pL, rR, uR, vR, pR;
-            prim(i, jL, rL, uL, vL, pL);
-            prim(i, jR, rR, uR, vR, pR);
+            // MUSCL reconstruction when stencil is available: jL-1 >= -1 and jR+1 <= ncj
+            if (scheme_order >= 2 && j >= 1 && j <= ncj - 1) {
+                double rhoA, uA, vA, pA, rhoB, uB, vB, pB;
+                prim(i, jL - 1, rhoA, uA, vA, pA);
+                prim(i, jR + 1, rhoB, uB, vB, pB);
+                muscl(rhoA, rho0, rho1, rhoB, rL, rR);
+                muscl(uA,   u0,   u1,   uB,   uL, uR);
+                muscl(vA,   v0,   v1,   vB,   vL, vR);
+                muscl(pA,   p0,   p1,   pB,   pL, pR);
+            } else {
+                rL = rho0; uL = u0; vL = v0; pL = p0;
+                rR = rho1; uR = u1; vR = v1; pR = p1;
+            }
+            rL = std::max(rL, 1e-10); rR = std::max(rR, 1e-10);
+            pL = std::max(pL, 1e-10); pR = std::max(pR, 1e-10);
 
             double F[4];
             roe_flux(rL, uL, vL, pL, rR, uR, vR, pR, nx, ny, gamma, F);
@@ -203,6 +256,14 @@ void Solver::run() {
     // Stored as Un[var*N + j*nci + i]
     std::vector<double> Un(4 * N, 0.0);
 
+    // Warmup: run first-order until warmup_iters, then switch to scheme_order.
+    // This gives a well-converged initial condition for MUSCL.
+    int final_order = scheme_order;
+    if (warmup_iters > 0 && scheme_order >= 2) {
+        scheme_order = 1;
+        std::cout << "  [warmup] running order=1 for " << warmup_iters << " iters\n";
+    }
+
     auto pack_real = [&](std::vector<double>& buf) {
         for (int j = 0; j < ncj; ++j)
             for (int i = 0; i < nci; ++i)
@@ -216,6 +277,15 @@ void Solver::run() {
 
     for (int iter = 1; iter <= max_iter; ++iter) {
 
+        // Switch from warmup (order=1) to final order
+        if (scheme_order < final_order && iter > warmup_iters) {
+            scheme_order = final_order;
+            res0 = -1.0;  // reset normalization for MUSCL phase
+            std::cout << "  [order switch] switched to order=" << scheme_order
+                      << " at iter " << iter << "\n";
+            conv << "# switched to order=" << scheme_order << " at iter " << iter << "\n";
+        }
+
         // Save Un for RK combination
         pack_real(Un);
 
@@ -227,11 +297,11 @@ void Solver::run() {
         double res_rho = 0.0;
         for (int k = 0; k < N; ++k) res_rho += R[k] * R[k];
         res_rho = std::sqrt(res_rho / N);
-        if (iter == 1) res0 = res_rho;
+        if (res0 < 0.0) res0 = res_rho;  // capture first residual of current phase
         double res_norm = (res0 > 0.0) ? res_rho / res0 : 1.0;
 
         conv << iter << " " << res_rho << " " << res_norm << "\n";
-        if (iter % output_interval == 0 || iter <= 2)
+        if (iter % output_interval == 0 || iter <= 2 || (iter == warmup_iters + 1))
             std::cout << "iter " << iter
                       << "  res=" << res_rho
                       << "  res/res0=" << res_norm << "\n";

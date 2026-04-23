@@ -66,7 +66,8 @@ int main(int argc, char* argv[]) {
     double cfl           = std::stod(get_param(ini, "cfl",            "1.5"));
     int    max_iter      = std::stoi(get_param(ini, "max_iter",       "20000"));
     double residual_drop = std::stod(get_param(ini, "residual_drop",  "1e-5"));
-    int    scheme_order  = std::stoi(get_param(ini, "scheme_order",   "2"));
+    int    scheme_order    = std::stoi(get_param(ini, "scheme_order",    "2"));
+    int    warmup_iters    = std::stoi(get_param(ini, "warmup_iters",    "0"));
     int    output_interval = std::stoi(get_param(ini, "output_interval", "500"));
 
     std::filesystem::create_directories("output");
@@ -137,7 +138,7 @@ int main(int argc, char* argv[]) {
     Solver solver;
     solver.init(mesh, mach, aoa_deg, gamma,
                 cfl, max_iter, residual_drop,
-                scheme_order, output_interval);
+                scheme_order, warmup_iters, output_interval);
 
     solver.print_bc_diagnostics();
 

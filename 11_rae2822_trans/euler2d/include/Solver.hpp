@@ -20,7 +20,7 @@ public:
 
     // ---- run config ----
     double cfl, residual_drop;
-    int    max_iter, scheme_order, output_interval;
+    int    max_iter, scheme_order, warmup_iters, output_interval;
 
     const Mesh* pmesh = nullptr;
 
@@ -28,7 +28,7 @@ public:
     void init(const Mesh& m,
               double mach, double aoa_deg, double gamma,
               double cfl, int max_iter, double residual_drop,
-              int scheme_order, int output_interval);
+              int scheme_order, int warmup_iters, int output_interval);
 
     // Run the solver loop (SSP-RK3 + local time stepping)
     void run();
