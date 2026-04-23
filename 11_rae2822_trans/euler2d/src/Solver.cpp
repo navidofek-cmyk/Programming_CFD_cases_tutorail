@@ -338,8 +338,9 @@ void Solver::run() {
         // Write output files periodically and at convergence
         bool last = (res_norm < residual_drop) || (iter == max_iter);
         if (iter % output_interval == 0 || last) {
-            write_field(*this, "output/field.vts");
-            write_cp   (*this, "output/cp.dat");
+            write_field  (*this, "output/field.vts");
+            write_surface(*this, "output/surface.vtp");
+            write_cp     (*this, "output/cp.dat");
         }
 
         if (res_norm < residual_drop) {

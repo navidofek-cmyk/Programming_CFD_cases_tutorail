@@ -101,6 +101,94 @@ void write_field(const Solver& s, const std::string& path) {
       << "</VTKFile>\n";
 }
 
+// ---- VTK PolyData of airfoil surface (.vtp) ---------------------------------
+//
+// A 1D polyline (cells = line segments) along j=0 from i_TEl to i_TEu.
+// PointData: cp, pressure, mach_surface.
+// Points are the j=0 WALL NODES (not cell centers) for exact geometry.
+
+void write_surface(const Solver& s, const std::string& path) {
+    const Mesh& m = *s.pmesh;
+    int i0 = m.i_TEl, i1 = m.i_TEu;  // inclusive node range on airfoil
+    int n_pts  = i1 - i0 + 1;         // number of nodes
+    int n_cells = n_pts - 1;           // number of line segments
+
+    double q_inf2   = s.u_inf*s.u_inf + s.v_inf*s.v_inf;
+    double cp_denom = 0.5 * s.rho_inf * q_inf2;
+
+    std::ofstream f(path);
+    if (!f) throw std::runtime_error("Cannot open " + path);
+
+    f << "<?xml version=\"1.0\"?>\n"
+      << "<VTKFile type=\"PolyData\" version=\"0.1\" byte_order=\"LittleEndian\">\n"
+      << "  <PolyData>\n"
+      << "    <Piece NumberOfPoints=\"" << n_pts
+      << "\" NumberOfVerts=\"0\" NumberOfLines=\"" << n_cells
+      << "\" NumberOfStrips=\"0\" NumberOfPolys=\"0\">\n";
+
+    // Points (wall nodes at j=0)
+    f << "      <Points>\n"
+      << "        <DataArray type=\"Float64\" NumberOfComponents=\"3\" format=\"ascii\">\n";
+    for (int i = i0; i <= i1; ++i)
+        f << m.node_x(i, 0) << " " << m.node_y(i, 0) << " 0\n";
+    f << "        </DataArray>\n"
+      << "      </Points>\n";
+
+    // Lines (connectivity)
+    f << "      <Lines>\n"
+      << "        <DataArray type=\"Int32\" Name=\"connectivity\" format=\"ascii\">\n";
+    for (int k = 0; k < n_cells; ++k)
+        f << k << " " << k + 1 << "\n";
+    f << "        </DataArray>\n"
+      << "        <DataArray type=\"Int32\" Name=\"offsets\" format=\"ascii\">\n";
+    for (int k = 1; k <= n_cells; ++k) f << 2*k << "\n";
+    f << "        </DataArray>\n"
+      << "      </Lines>\n";
+
+    // PointData — average adjacent cell values onto nodes
+    // Node i has cells (i-1, 0) and (i, 0); use the average (clamp at ends)
+    auto node_prim = [&](int i, double& r, double& u, double& v, double& p) {
+        int iL = std::max(i - 1, 0);
+        int iR = std::min(i, s.nci - 1);
+        r = 0.5 * (s.rho  (iL,0) + s.rho  (iR,0));
+        u = 0.5 * (s.vel_u(iL,0) + s.vel_u(iR,0));
+        v = 0.5 * (s.vel_v(iL,0) + s.vel_v(iR,0));
+        p = 0.5 * (s.press(iL,0) + s.press(iR,0));
+    };
+
+    f << "      <PointData Scalars=\"cp\">\n";
+
+    // cp
+    f << "        <DataArray type=\"Float64\" Name=\"cp\" format=\"ascii\">\n";
+    for (int i = i0; i <= i1; ++i) {
+        double r, u, v, p; node_prim(i, r, u, v, p);
+        f << ((cp_denom > 0.0) ? (p - s.p_inf) / cp_denom : 0.0) << "\n";
+    }
+    f << "        </DataArray>\n";
+
+    // pressure
+    f << "        <DataArray type=\"Float64\" Name=\"pressure\" format=\"ascii\">\n";
+    for (int i = i0; i <= i1; ++i) {
+        double r, u, v, p; node_prim(i, r, u, v, p);
+        f << p << "\n";
+    }
+    f << "        </DataArray>\n";
+
+    // mach_surface
+    f << "        <DataArray type=\"Float64\" Name=\"mach_surface\" format=\"ascii\">\n";
+    for (int i = i0; i <= i1; ++i) {
+        double r, u, v, p; node_prim(i, r, u, v, p);
+        double c = std::sqrt(s.gamma * p / r);
+        f << std::sqrt(u*u + v*v) / c << "\n";
+    }
+    f << "        </DataArray>\n";
+
+    f << "      </PointData>\n"
+      << "    </Piece>\n"
+      << "  </PolyData>\n"
+      << "</VTKFile>\n";
+}
+
 // ---- ASCII Cp along airfoil surface -----------------------------------------
 
 void write_cp(const Solver& s, const std::string& path) {
