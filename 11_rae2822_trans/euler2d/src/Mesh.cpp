@@ -10,9 +10,8 @@ static constexpr double PI = 3.14159265358979323846;
 // ---- helpers ---------------------------------------------------------------
 
 static double tanh_stretch(double t, double beta) {
-    // Map t in [0,1] to s in [0,1] with tanh clustering toward t=0.
-    // beta > 1: more clustering near wall. Typical: 1.5 - 3.0.
-    return std::tanh(beta * t) / std::tanh(beta);
+    // Cluster near t=0 (wall): s=0 at t=0, s=1 at t=1, dense near wall.
+    return 1.0 - std::tanh(beta * (1.0 - t)) / std::tanh(beta);
 }
 
 // ---- inner boundary (j=0): airfoil + wake lines ----------------------------
@@ -108,43 +107,51 @@ static void build_outer_boundary(Mesh& m, const MeshConfig& cfg) {
     double r = cfg.r_far;
     int nj = m.nj;
 
-    // Outer C-boundary, continuous, three pieces (junction nodes shared):
+    // Outer C-boundary — three pieces, junction nodes shared:
     //
-    //  Lower diagonal: i=[0, nw-1],       (r,0) → (0,-r)
-    //  Left semicircle: i=[nw-1, nw+na-1], (0,-r) → (-r,0) → (0,r)   [x ≤ 0 side]
-    //  Upper diagonal: i=[nw+na-1, ni-1],  (0,r) → (r,0)
+    //  Lower vertical:  i=[0, nw-1],       x=r, y: 0 → -r
+    //  Arc:             i=[nw-1, nw+na-1],  (r,-r) → (-r,0) → (r,r)
+    //  Upper vertical:  i=[nw+na-1, ni-1],  x=r, y: r → 0
     //
-    // Each junction node is written by both adjacent pieces to the same value → no gap.
+    // The arc lies on a circle centered at (r/4, 0), radius 5r/4.
+    // That circle passes through (r,-r), (-r,0), and (r,r), giving a
+    // smooth D-shaped farfield with no diagonal "triangle" in the wake.
 
-    // Lower diagonal
+    // Lower vertical: x=r, y from 0 to -r
     for (int i = 0; i < nw; ++i) {
         double t = (double)i / (nw - 1);
-        m.node_x(i, nj - 1) = r * (1.0 - t);
+        m.node_x(i, nj - 1) = r;
         m.node_y(i, nj - 1) = -r * t;
     }
-    // i=nw-1: (0, -r)
+    // i=nw-1: (r, -r)
 
-    // Left semicircle: k in [0, na], gi = (nw-1)+k covers i=[nw-1, nw-1+na]=[nw-1, nw+na-1]
-    // angle = 3pi/2 - pi*t: t=0 → 3pi/2=(0,-r), t=0.5 → pi=(-r,0), t=1 → pi/2=(0,r)
+    // Arc on circle (cx=r/4, cy=0, R=5r/4):
+    // theta_start = atan2(-r, r-r/4) = atan2(-4,3), going CW through -pi to theta_end
+    double cx = r / 4.0;
+    double R  = 5.0 * r / 4.0;
+    double theta_start = std::atan2(-r, r - cx);           // ≈ -0.9273 rad
+    double theta_end   = std::atan2( r, r - cx);           // ≈ +0.9273 rad
+    double arc_span    = 2.0 * PI - (theta_end - theta_start);  // long way around
+
     for (int k = 0; k <= na; ++k) {
         double t = (double)k / na;
-        double angle = 3.0 * PI / 2.0 - PI * t;
+        double theta = theta_start - t * arc_span;          // CW → goes via x<0
         int gi = (nw - 1) + k;
-        m.node_x(gi, nj - 1) = r * std::cos(angle);
-        m.node_y(gi, nj - 1) = r * std::sin(angle);
+        m.node_x(gi, nj - 1) = cx + R * std::cos(theta);
+        m.node_y(gi, nj - 1) =      R * std::sin(theta);
     }
-    // gi=nw-1: (0,-r)  — same as lower diagonal end ✓
-    // gi=nw+na-1: (0,r)
+    // gi=nw-1 (k=0): (r,-r)  — same as lower vertical end ✓
+    // gi=nw+na-1 (k=na): (r,r)
 
-    // Upper diagonal
+    // Upper vertical: x=r, y from r to 0
     for (int k = 0; k < nw; ++k) {
         double t = (double)k / (nw - 1);
         int gi = (nw + na - 1) + k;
-        m.node_x(gi, nj - 1) = r * t;
+        m.node_x(gi, nj - 1) = r;
         m.node_y(gi, nj - 1) = r * (1.0 - t);
     }
-    // gi=nw+na-1: (0,r)  — same as semicircle end ✓
-    // gi=nw+na-1+nw-1 = 2*nw+na-2 = ni-1: (r,0)
+    // gi=nw+na-1 (k=0): (r,r)  — same as arc end ✓
+    // gi=ni-1 (k=nw-1): (r,0)
 }
 
 // ---- TFI fill interior ------------------------------------------------------
@@ -155,7 +162,7 @@ static void build_outer_boundary(Mesh& m, const MeshConfig& cfg) {
 static void tfi_fill(Mesh& m, const MeshConfig& /*cfg*/) {
     int ni = m.ni;
     int nj = m.nj;
-    double beta = 2.5;  // tanh stretching parameter
+    double beta = 3.5;  // tanh stretching, clusters near wall (j=0)
 
     for (int i = 0; i < ni; ++i) {
         double x0 = m.node_x(i, 0);

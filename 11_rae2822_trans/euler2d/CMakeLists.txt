@@ -15,4 +15,8 @@ include_directories(include)
 add_executable(euler2d
     src/main.cpp
     src/Mesh.cpp
+    src/Solver.cpp
+    src/BC.cpp
+    src/Flux.cpp
+    src/IO.cpp
 )
