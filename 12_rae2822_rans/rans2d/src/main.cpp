@@ -1,4 +1,6 @@
 #include "Mesh.hpp"
+#include "Solver.hpp"
+#include "IO.hpp"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -17,12 +19,12 @@ static std::string get_param(const std::string& ini, const std::string& key,
         auto eq = line.find('=');
         if (eq == std::string::npos) continue;
         std::string k = line.substr(0, eq);
-        while (!k.empty() && (k.back() == ' ' || k.back() == '\t')) k.pop_back();
-        while (!k.empty() && (k.front() == ' ' || k.front() == '\t')) k.erase(k.begin());
+        while (!k.empty() && (k.back()==' ' || k.back()=='\t')) k.pop_back();
+        while (!k.empty() && (k.front()==' ' || k.front()=='\t')) k.erase(k.begin());
         if (k != key) continue;
         std::string v = line.substr(eq + 1);
-        while (!v.empty() && (v.front() == ' ' || v.front() == '\t')) v.erase(v.begin());
-        while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.pop_back();
+        while (!v.empty() && (v.front()==' ' || v.front()=='\t')) v.erase(v.begin());
+        while (!v.empty() && (v.back()==' ' || v.back()=='\t')) v.pop_back();
         return v;
     }
     return def;
@@ -39,49 +41,54 @@ int main(int argc, char* argv[]) {
     if (argc >= 2) config_path = argv[1];
     std::string ini = read_file(config_path);
 
+    // ---- mesh params ----
     MeshConfig cfg;
-    cfg.ni_wrap    = std::stoi(get_param(ini, "ni_wrap",    "513"));
-    cfg.nj_normal  = std::stoi(get_param(ini, "nj_normal",  "129"));
-    cfg.n_airfoil  = std::stoi(get_param(ini, "n_airfoil",  "257"));
-    cfg.n_wake     = std::stoi(get_param(ini, "n_wake",     "128"));
-    cfg.r_far      = std::stod(get_param(ini, "r_far",      "25.0"));
-    cfg.tanh_beta  = std::stod(get_param(ini, "tanh_beta",  "7.5"));
+    cfg.ni_wrap    = std::stoi(get_param(ini, "ni_wrap",   "640"));
+    cfg.nj_normal  = std::stoi(get_param(ini, "nj_normal", "129"));
+    cfg.n_airfoil  = std::stoi(get_param(ini, "n_airfoil", "257"));
+    cfg.n_wake     = std::stoi(get_param(ini, "n_wake",    "192"));
+    cfg.r_far      = std::stod(get_param(ini, "r_far",     "25.0"));
+    cfg.tanh_beta  = std::stod(get_param(ini, "tanh_beta", "7.5"));
 
-    int expected = 2 * cfg.n_wake + cfg.n_airfoil - 1;
+    int expected = 2*cfg.n_wake + cfg.n_airfoil - 1;
     if (cfg.ni_wrap != expected) {
         std::cerr << "Warning: ni_wrap=" << cfg.ni_wrap
                   << " expected " << expected << ", using computed.\n";
         cfg.ni_wrap = expected;
     }
 
+    // ---- solver params ----
+    double mach          = std::stod(get_param(ini, "mach",           "0.729"));
+    double aoa_deg       = std::stod(get_param(ini, "aoa_deg",        "2.31"));
+    double gamma         = std::stod(get_param(ini, "gamma",          "1.4"));
+    double cfl           = std::stod(get_param(ini, "cfl",            "1.5"));
+    double cfl_impl      = std::stod(get_param(ini, "cfl_impl",       "20.0"));
+    double omega         = std::stod(get_param(ini, "omega",          "1.0"));
+    int    max_iter      = std::stoi(get_param(ini, "max_iter",       "2000"));
+    double residual_drop = std::stod(get_param(ini, "residual_drop",  "1e-6"));
+    int    scheme_order  = std::stoi(get_param(ini, "scheme_order",   "2"));
+    int    warmup_iters  = std::stoi(get_param(ini, "warmup_iters",   "0"));
+    int    output_interval = std::stoi(get_param(ini, "output_interval", "200"));
+
     std::filesystem::create_directories("output");
 
+    // ---- Stage 1: mesh ----
     std::cout << "Generating RANS C-grid: ni=" << cfg.ni_wrap
               << " nj=" << cfg.nj_normal
               << " n_airfoil=" << cfg.n_airfoil
               << " n_wake=" << cfg.n_wake
-              << " r_far=" << cfg.r_far
               << " tanh_beta=" << cfg.tanh_beta << "\n";
 
     Mesh mesh;
     mesh.generate(cfg);
 
+    int nci = mesh.nc_i(), ncj = mesh.nc_j();
     std::cout << "i_TEl=" << mesh.i_TEl
               << " i_LE=" << mesh.i_LE
-              << " i_TEu=" << mesh.i_TEu << "\n";
+              << " i_TEu=" << mesh.i_TEu
+              << " cells=" << nci << "x" << ncj << "\n";
 
-    int nci = mesh.nc_i(), ncj = mesh.nc_j();
-
-    // ---- mesh quality statistics ----
-    double amin = 1e99, amax = 0.0;
-    int neg_count = 0;
-    for (double a : mesh.area) {
-        if (a < amin) amin = a;
-        if (a > amax) amax = a;
-        if (a <= 0.0) ++neg_count;
-    }
-
-    // First-cell normal height at airfoil wall (averaged)
+    // Mesh quality: y+ estimate
     double dy1_sum = 0.0; int dy1_n = 0;
     for (int i = mesh.i_TEl; i <= mesh.i_TEu; ++i) {
         double dx = mesh.node_x(i,1) - mesh.node_x(i,0);
@@ -90,50 +97,26 @@ int main(int argc, char* argv[]) {
         ++dy1_n;
     }
     double dy1_avg = dy1_sum / dy1_n;
-    double dy1_min = 1e99;
-    for (int i = mesh.i_TEl; i <= mesh.i_TEu; ++i) {
-        double dx = mesh.node_x(i,1) - mesh.node_x(i,0);
-        double dy = mesh.node_y(i,1) - mesh.node_y(i,0);
-        dy1_min = std::min(dy1_min, std::sqrt(dx*dx + dy*dy));
-    }
+    double re = std::stod(get_param(ini, "reynolds", "6.5e6"));
+    double cf = 0.003;
+    double u_tau = std::sqrt(cf / 2.0);
+    double yplus = dy1_avg * u_tau * re;
+    std::cout << "  h1_avg=" << dy1_avg << " c  y+_est=" << yplus << "\n";
 
-    // AR at wall
-    double ar_max = 0.0;
-    for (int i = 0; i < nci; ++i) {
-        double dxi = mesh.node_x(i+1,0) - mesh.node_x(i,0);
-        double dyi = mesh.node_y(i+1,0) - mesh.node_y(i,0);
-        double ds_i = std::sqrt(dxi*dxi + dyi*dyi);
-        double dxj = mesh.node_x(i,1) - mesh.node_x(i,0);
-        double dyj = mesh.node_y(i,1) - mesh.node_y(i,0);
-        double ds_j = std::sqrt(dxj*dxj + dyj*dyj);
-        if (ds_j > 0 && ds_i > 0)
-            ar_max = std::max(ar_max, ds_i / ds_j);
-    }
+    // ---- Stage 2: LU-SGS Euler solver ----
+    std::cout << "\n--- Stage 2: LU-SGS Euler solver ---\n";
+    std::cout << "  M=" << mach << " AoA=" << aoa_deg
+              << "° CFL_warmup=" << cfl << " CFL_impl=" << cfl_impl
+              << " omega=" << omega << " order=" << scheme_order << "\n";
 
-    // y+ estimate: y+ = y1 * u_tau / nu = y1 * sqrt(Cf/2) * Re
-    // Cf ≈ 0.003 for turbulent flat plate at Re=6.5e6
-    double re = 6.5e6, cf = 0.003;
-    double u_tau = std::sqrt(cf / 2.0);  // non-dim: u_tau / u_inf
-    double nu = 1.0 / re;
-    double yplus_avg = dy1_avg * u_tau / nu;
-    double yplus_min = dy1_min * u_tau / nu;
+    Solver solver;
+    solver.init(mesh, mach, aoa_deg, gamma,
+                cfl, cfl_impl, omega, max_iter, residual_drop,
+                scheme_order, warmup_iters, output_interval);
 
-    std::cout << "\n=== RANS Mesh statistics ===\n";
-    std::cout << "  Cells:              " << nci << " x " << ncj
-              << " = " << nci*ncj << "\n";
-    std::cout << "  Area range:         [" << amin << ", " << amax << "]\n";
-    if (neg_count > 0)
-        std::cerr << "  WARNING: " << neg_count << " non-positive areas!\n";
-    else
-        std::cout << "  Negative areas:     none\n";
-    std::cout << "  h1 avg (airfoil):   " << dy1_avg << " c\n";
-    std::cout << "  h1 min (airfoil):   " << dy1_min << " c\n";
-    std::cout << "  y+ estimate avg:    " << yplus_avg << "\n";
-    std::cout << "  y+ estimate min:    " << yplus_min << "\n";
-    std::cout << "  AR max at wall:     " << ar_max << "\n";
-
-    mesh.write_tecplot("output/mesh.dat");
-    std::cout << "\nWrote output/mesh.dat\n";
+    solver.print_bc_diagnostics();
+    std::cout << "\n";
+    solver.run();
 
     return 0;
 }

@@ -15,4 +15,8 @@ include_directories(include)
 add_executable(rans2d
     src/main.cpp
     src/Mesh.cpp
+    src/Solver.cpp
+    src/Flux.cpp
+    src/BC.cpp
+    src/IO.cpp
 )
