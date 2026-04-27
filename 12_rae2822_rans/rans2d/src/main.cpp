@@ -63,6 +63,7 @@ int main(int argc, char* argv[]) {
     double gamma         = std::stod(get_param(ini, "gamma",          "1.4"));
     double reynolds      = std::stod(get_param(ini, "reynolds",       "0.0"));
     double prandtl       = std::stod(get_param(ini, "prandtl",        "0.72"));
+    double prandtl_t     = std::stod(get_param(ini, "prandtl_t",      "0.9"));
     double cfl           = std::stod(get_param(ini, "cfl",            "1.5"));
     double cfl_impl      = std::stod(get_param(ini, "cfl_impl",       "0.8"));
     double omega         = std::stod(get_param(ini, "omega",          "1.0"));
@@ -113,7 +114,7 @@ int main(int argc, char* argv[]) {
 
     Solver solver;
     solver.init(mesh, mach, aoa_deg, gamma,
-                reynolds, prandtl,
+                reynolds, prandtl, prandtl_t,
                 cfl, cfl_impl, omega, max_iter, residual_drop,
                 scheme_order, warmup_iters, output_interval);
 

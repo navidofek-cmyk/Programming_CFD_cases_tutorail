@@ -151,6 +151,16 @@ void write_field(const Solver& s, const std::string& path) {
         }
     f << "        </DataArray>\n";
 
+    // turbulent viscosity ratio μ_t/μ_lam  (0 = laminar/inviscid)
+    if (s.reynolds > 0.0 && !s.sa_data.empty()) {
+        double mu_lam = 1.0 / s.reynolds;
+        f << "        <DataArray type=\"Float64\" Name=\"mu_t_ratio\" format=\"ascii\">\n";
+        for (int j = 0; j < ncj; ++j)
+            for (int i = 0; i < nci; ++i)
+                f << s.mu_t(i,j) / mu_lam << "\n";
+        f << "        </DataArray>\n";
+    }
+
     f << "      </CellData>\n"
       << "    </Piece>\n"
       << "  </StructuredGrid>\n"

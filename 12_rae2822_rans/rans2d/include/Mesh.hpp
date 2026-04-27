@@ -21,6 +21,10 @@ struct Mesh {
     std::vector<double> ifnx, ifny, iflen;
     std::vector<double> jfnx, jfny, jflen;
 
+    // Minimum distance from each cell centre to the nearest airfoil wall node.
+    // Precomputed in generate(). Size nc_i() * nc_j().
+    std::vector<double> wall_dist;
+
     int i_LE, i_TEl, i_TEu;
 
     inline double& node_x(int i, int j)       { return x[j * ni + i]; }

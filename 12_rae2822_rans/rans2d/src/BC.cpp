@@ -192,3 +192,8 @@ void bc_wall_noslip(Solver& s) {
         s.U(3, i, -1) =  r * E;           // ρE unchanged
     }
 }
+
+// ---- SA turbulence BC -------------------------------------------------------
+// These are called from Solver::apply_sa_bc() (called inside apply_bc()).
+// Inline helpers used directly in Solver::apply_bc below since BC.cpp doesn't
+// know the SA accessor — see solver apply_bc instead.

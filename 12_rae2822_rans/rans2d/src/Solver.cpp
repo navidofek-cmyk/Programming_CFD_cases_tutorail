@@ -27,9 +27,43 @@ double Solver::sound(int i, int j) const {
     return std::sqrt(gamma * press(i, j) / U(0, i, j));
 }
 
+// ---- Spalart-Allmaras helpers -----------------------------------------------
+
+double Solver::sa_fv1(double chi) const {
+    double c3 = SA_cv1 * SA_cv1 * SA_cv1;
+    double x3 = chi * chi * chi;
+    return x3 / (x3 + c3);
+}
+
+double Solver::sa_fw(double r) const {
+    double g  = r + SA_cw2 * (std::pow(r, 6.0) - r);
+    double c6 = std::pow(SA_cw3, 6.0);
+    return g * std::pow((1.0 + c6) / (std::pow(g, 6.0) + c6), 1.0 / 6.0);
+}
+
+double Solver::mu_t(int i, int j) const {
+    if (reynolds <= 0.0 || sa_data.empty()) return 0.0;
+    double chi  = SA(i,j) * reynolds / rho(i,j);  // ν̃ / ν_mol = ρν̃*Re/ρ
+    return SA(i,j) * sa_fv1(chi);                  // ρν̃ * fv1  (= ρ*ν_t, non-dim)
+}
+
+double Solver::mu_eff(int i, int j) const {
+    // μ_eff = μ + μ_t = 1/Re + ρν̃*fv1
+    double mu_lam = (reynolds > 0.0) ? 1.0 / reynolds : 0.0;
+    return mu_lam + mu_t(i, j);
+}
+
+double Solver::kappa_eff(int i, int j) const {
+    // κ_eff: lam + turb Prandtl contributions to heat conductivity
+    // κ = μ * γ / ((γ-1) * Pr)
+    double mu_lam = (reynolds > 0.0) ? 1.0 / reynolds : 0.0;
+    return mu_lam * gamma / ((gamma - 1.0) * prandtl)
+         + mu_t(i, j) * gamma / ((gamma - 1.0) * prandtl_t);
+}
+
 void Solver::init(const Mesh& m,
                   double mach_, double aoa_deg_, double gamma_,
-                  double reynolds_, double prandtl_,
+                  double reynolds_, double prandtl_, double prandtl_t_,
                   double cfl_, double cfl_impl_, double omega_,
                   int max_iter_, double residual_drop_,
                   int scheme_order_, int warmup_iters_,
@@ -40,6 +74,7 @@ void Solver::init(const Mesh& m,
     aoa_deg       = aoa_deg_;
     reynolds      = reynolds_;
     prandtl       = prandtl_;
+    prandtl_t     = prandtl_t_;
     cfl           = cfl_;
     cfl_impl      = cfl_impl_;
     omega         = omega_;
@@ -63,6 +98,20 @@ void Solver::init(const Mesh& m,
     for (int j = 0; j < ncj; ++j)
         for (int i = 0; i < nci; ++i)
             set_cons(i, j, rho_inf, u_inf, v_inf, p_inf);
+
+    // SA initialization: start with ν̃ = 0 (cold start).
+    // The freestream BC maintains ñ_inf=3/Re at the farfield.
+    // Starting from 0 avoids the large initial destruction term that arises
+    // when S̃ < 0 in uniform flow (no wall shear to sustain turbulence).
+    double nu_inf = (reynolds > 0.0) ? 3.0 / reynolds : 0.0;
+    // SA initialization: ν̃ = 3 * ν_mol = 3/Re throughout domain.
+    // Semi-implicit destruction prevents stiff blow-up during the initial
+    // transient where S̃ < 0 (no shear in freestream).
+    sa_data.assign((nci + 2) * (ncj + 2), 0.0);
+    for (int j = 0; j < ncj; ++j)
+        for (int i = 0; i < nci; ++i)
+            SA(i, j) = rho_inf * nu_inf;
+
     apply_bc();
 }
 
@@ -72,6 +121,32 @@ void Solver::apply_bc() {
     bc_farfield(*this);
     bc_wake_cut(*this);
     bc_i_exit(*this);
+
+    if (sa_data.empty()) return;  // SA not initialised yet
+
+    // ---- SA ghost cells ----
+    double nu_inf  = (reynolds > 0.0) ? 3.0 / reynolds : 0.0;
+    double sa_inf  = rho_inf * nu_inf;   // ρν̃ at farfield
+
+    // Wall j=-1: ν̃=0 → ρν̃_ghost = -ρν̃_real (mirror)
+    for (int i = pmesh->i_TEl; i < pmesh->i_TEu; ++i)
+        SA(i, -1) = -SA(i, 0);
+
+    // Farfield j=ncj: ρν̃ = sa_inf
+    for (int i = 0; i < nci; ++i)
+        SA(i, ncj) = sa_inf;
+
+    // Wake cut: mirror (same as NS variables)
+    for (int i = 0; i < pmesh->i_TEl; ++i)
+        SA(i, -1) = SA(nci - 1 - i, 0);
+    for (int i = pmesh->i_TEu; i < nci; ++i)
+        SA(i, -1) = SA(nci - 1 - i, 0);
+
+    // i-exit: extrapolation
+    for (int j = 0; j < ncj; ++j) {
+        SA(-1,  j) = SA(0,      j);
+        SA(nci, j) = SA(nci-1,  j);
+    }
 }
 
 void Solver::print_bc_diagnostics() const {
@@ -280,30 +355,23 @@ void Solver::compute_rhs(std::vector<double>& R,
 
     if (reynolds <= 0.0) return;
 
-    const double mu    = 1.0 / reynolds;
-    const double kappa = mu * gamma / ((gamma - 1.0) * prandtl);
-
-    // Helper: build Fv from normal gradient only (∂φ/∂n = Δφ/d in face-n direction)
+    // Helper: build Fv from normal gradient, with per-face mu_f and kappa_f
     auto viscous_face = [&](int kL, int kR,
                             double nx, double ny, double len2,
                             double dudn, double dvdn, double dTdn,
-                            double uf, double vf) {
-        // Normal-gradient stress (thin-layer: only ∂/∂n terms survive)
-        // Full: τ = μ(∂u_i/∂x_j + ∂u_j/∂x_i - 2/3 δ_ij ∇·u)
-        // Thin: ∇·u ≈ 0 for incompressible-like BL, τ_nn = 2μ ∂u_n/∂n,
-        //       τ_tn = μ ∂u_t/∂n (dominant shear term)
-        // Here we project the full gradient tensor assuming ∇φ ≈ (∂φ/∂n)*n:
+                            double uf, double vf,
+                            double mu_f, double kappa_f) {
         double dudx = dudn*nx, dudy = dudn*ny;
         double dvdx = dvdn*nx, dvdy = dvdn*ny;
         double divu = dudx + dvdy;
-        double txx  = mu * (2*dudx - (2.0/3.0)*divu);
-        double tyy  = mu * (2*dvdy - (2.0/3.0)*divu);
-        double txy  = mu * (dudy + dvdx);
+        double txx  = mu_f * (2*dudx - (2.0/3.0)*divu);
+        double tyy  = mu_f * (2*dvdy - (2.0/3.0)*divu);
+        double txy  = mu_f * (dudy + dvdx);
         double Fv[4] = {
             0.0,
             txx*nx + txy*ny,
             txy*nx + tyy*ny,
-            (txx*uf+txy*vf)*nx + (txy*uf+tyy*vf)*ny + kappa*dTdn
+            (txx*uf+txy*vf)*nx + (txy*uf+tyy*vf)*ny + kappa_f*dTdn
         };
         if (kL >= 0 && kL < (int)(m.area.size()) && m.area[kL] >= AREA_MIN) {
             double invAL = 1.0/m.area[kL];
@@ -332,10 +400,10 @@ void Solver::compute_rhs(std::vector<double>& R,
                     double d  = (m.xc[kR]-xw)*nx + (m.yc[kR]-yw)*ny;
                     if (d > 1e-15) {
                         double uc = vel_u(i,0), vc = vel_v(i,0);
-                        // ∂u/∂n = u_real/d (ghost = -real gives diff = 2u over 2d)
                         viscous_face(-1, kR, nx, ny, len2,
-                                     uc/d, vc/d, 0.0,  // dTdn=0 (adiabatic)
-                                     0.0, 0.0);          // u=v=0 at wall face
+                                     uc/d, vc/d, 0.0,   // dTdn=0 (adiabatic)
+                                     0.0, 0.0,            // u=v=0 at wall face
+                                     mu_eff(i,0), kappa_eff(i,0));
                     }
                 }
             }
@@ -358,9 +426,12 @@ void Solver::compute_rhs(std::vector<double>& R,
             double TL = gamma*press(i,j-1)/rho(i,j-1);
             double TR = gamma*press(i,j  )/rho(i,j  );
 
+            double mu_f     = 0.5*(mu_eff(i,j-1)    + mu_eff(i,j));
+            double kappa_f  = 0.5*(kappa_eff(i,j-1)  + kappa_eff(i,j));
             viscous_face(kL, kR, nx, ny, len2,
                          (uR-uL)/d_LR, (vR-vL)/d_LR, (TR-TL)/d_LR,
-                         0.5*(uL+uR), 0.5*(vL+vR));
+                         0.5*(uL+uR), 0.5*(vL+vR),
+                         mu_f, kappa_f);
         }
     }
 }
@@ -485,14 +556,179 @@ void Solver::lusgs(const std::vector<double>& R, std::vector<double>& dU) const 
     }
 }
 
+// ---- SA RHS -----------------------------------------------------------------
+//
+// Computes the residual for the SA equation (ρν̃ transport).
+// Thin-layer: j-direction convection + diffusion + source.
+// Only for airfoil cells (i_TEl..i_TEu-1); wake cells are inviscid.
+//
+// Sign: dQ/dt = R_sa  →  R_sa[k] = -(convective) + source + diffusion
+
+// compute_sa_rhs fills:
+//   R_sa[k]    = convection + diffusion + production  (no destruction)
+//   D_sa[k]    = destruction coefficient (>=0); destruction = -D_sa * SA
+//
+// The SA update uses a semi-implicit (Jacobi) treatment of the stiff
+// destruction term to keep SA >= 0 without tiny time steps:
+//   SA_new = max(0, (SA_old + dt * R_sa) / (1 + dt * D_sa))
+
+void Solver::compute_sa_rhs(std::vector<double>& R_sa,
+                             std::vector<double>& D_sa,
+                             const std::vector<double>& dt_cell) const {
+    if (reynolds <= 0.0 || sa_data.empty()) return;
+
+    const Mesh& m = *pmesh;
+    std::fill(R_sa.begin(), R_sa.end(), 0.0);
+    std::fill(D_sa.begin(), D_sa.end(), 0.0);
+
+    const double mu_mol = 1.0 / reynolds;
+
+    for (int i = m.i_TEl; i < m.i_TEu; ++i) {
+        // ---- j-direction: convection + diffusion ----
+        for (int j = 0; j <= ncj; ++j) {
+            int jL = j-1, jR = j;
+            double nx = m.jfnx[j*nci+i], ny = m.jfny[j*nci+i];
+            double len = m.jflen[j*nci+i];
+            if (len < 1e-14) continue;
+
+            double Q_upwind, v_n_face;
+
+            if (j == 0) {
+                // Wall face: SA=0 at wall → ghost = -SA_real.
+                // SA value from upstream (upwind): use wall ghost = 0 at face.
+                // Convective flux = 0 (v_n ≈ 0 at no-slip wall).
+                // Only diffusion through wall (SA=0 gradient drives SA down).
+                if (m.area[0*nci+i] < AREA_MIN) continue;
+                double xw = 0.5*(m.node_x(i,0)+m.node_x(i+1,0));
+                double yw = 0.5*(m.node_y(i,0)+m.node_y(i+1,0));
+                double d  = (m.xc[i]-xw)*nx + (m.yc[i]-yw)*ny;
+                if (d < 1e-15) continue;
+                // Semi-implicit wall drain: SA→0 at wall.  The drain term
+                // mu_sa*ρ*ñ/d is proportional to the cell's own SA, so treat it
+                // implicitly (add to D_sa) to ensure stability for any dt.
+                // Explicit part = mu_sa * ρ * SA_wall / d = 0 (wall SA = 0).
+                double nutil = SA(i,0) / rho(i,0);
+                double mu_sa = (mu_mol + nutil) / SA_sigma;
+                double invA = 1.0 / m.area[i];
+                D_sa[i] += mu_sa * rho(i,0) * len * invA / d;
+                continue;
+            }
+
+            if (j == ncj) continue;  // farfield: SA maintained by BC
+
+            // Interior j-face between cells (i,jL) and (i,jR)
+            int kL = jL*nci+i, kR = jR*nci+i;
+            if (m.area[kL] < AREA_MIN || m.area[kR] < AREA_MIN) continue;
+
+            // Face normal velocity
+            double uL = vel_u(i,jL), vL = vel_v(i,jL);
+            double uR = vel_u(i,jR), vR = vel_v(i,jR);
+            v_n_face = 0.5*((uL+uR)*nx + (vL+vR)*ny);
+
+            // Upwind SA convective flux: Q_face = Q_upwind
+            Q_upwind = (v_n_face >= 0.0) ? SA(i,jL) : SA(i,jR);
+
+            double F_conv = Q_upwind * v_n_face;
+            double invAL = 1.0/m.area[kL], invAR = 1.0/m.area[kR];
+            R_sa[kL] -= F_conv * len * invAL;
+            R_sa[kR] += F_conv * len * invAR;
+
+            // SA diffusion (ν_mol + ν̃)/σ * ∂ν̃/∂n
+            double d_LR = (m.xc[kR]-m.xc[kL])*nx + (m.yc[kR]-m.yc[kL])*ny;
+            if (std::abs(d_LR) < 1e-8) continue;  // skip TE-region where j-face d_LR≈0
+            // Use gradient of Q=ρν̃ (not ν̃) for both diffusion and cb2.
+            // With ν̃ = Q/ρ, computing ∂ν̃/∂n from nutil differences generates a spurious
+            // term proportional to ∂ρ/∂n even when Q is uniform (e.g. at initialisation).
+            // Using ∂Q/∂n instead is zero for uniform SA and recovers the standard
+            // (μ+ν̃)/σ * ∂Q/∂n diffusion in the incompressible limit.
+            double nutil_f = 0.5*(SA(i,jL)/rho(i,jL) + SA(i,jR)/rho(i,jR));
+            double rho_f   = 0.5*(rho(i,jL)+rho(i,jR));
+            double d_Qdn   = (SA(i,jR) - SA(i,jL)) / d_LR;
+            double mu_sa_f = (mu_mol + nutil_f) / SA_sigma;
+            // Semi-implicit diffusion: split into explicit (from neighbour) + implicit (own cell).
+            // Avoids explicit diffusion CFL > 0.5 on fine RANS wall cells.
+            double diff_coeff = mu_sa_f / d_LR;
+            R_sa[kL] += diff_coeff * SA(i,jR) * len * invAL;   // explicit: jR → kL
+            R_sa[kR] += diff_coeff * SA(i,jL) * len * invAR;   // explicit: jL → kR
+            D_sa[kL] += diff_coeff * len * invAL;               // implicit: kL drains
+            D_sa[kR] += diff_coeff * len * invAR;               // implicit: kR drains
+            // cb2 volume source: (cb2/σ) * ρ * (∂ν̃/∂n)² ≈ (cb2/σ) * d_Qdn²/ρ per cell.
+            // Averaged from adjacent face gradient; split equally to kL and kR.
+            // NOTE: no d_LR*invA factor — this is a volume source, not a flux.
+            double Fcb2 = SA_cb2 / SA_sigma * d_Qdn * d_Qdn / rho_f;
+            R_sa[kL] += 0.5 * Fcb2;
+            R_sa[kR] += 0.5 * Fcb2;
+        }
+
+        // ---- SA source terms for each airfoil cell ----
+        for (int j = 0; j < ncj; ++j) {
+            int k = j*nci+i;
+            if (m.area[k] < AREA_MIN) continue;
+
+            double d_wall = m.wall_dist[k];
+            if (d_wall < 1e-30) continue;   // exactly on wall
+
+            double Q     = SA(i,j);          // ρν̃
+            double r_loc = rho(i,j);
+            double nutil = Q / r_loc;         // ν̃ = ρν̃/ρ
+            double chi   = nutil / (mu_mol / r_loc);  // χ = ν̃/(μ/ρ) = ρν̃*Re/ρ = Q*Re/r
+            if (chi < 0.0) { R_sa[k] -= Q / dt_cell[k]; continue; }  // clip negative
+
+            double fv1_v = sa_fv1(chi);
+            double fv2_v = 1.0 - chi / (1.0 + chi * fv1_v);
+
+            // Vorticity |ω| (thin-layer: use j-face velocity gradients)
+            double S_vort = 0.0;
+            {
+                // Average of face below (j) and face above (j+1)
+                auto dudn_at = [&](int jf) -> double {
+                    double nx2 = m.jfnx[jf*nci+i], ny2 = m.jfny[jf*nci+i];
+                    double len2 = m.jflen[jf*nci+i];
+                    if (len2 < 1e-14) return 0.0;
+                    double duL = vel_u(i, jf-1), duR = vel_u(i, jf);
+                    double xcL = m.xc[(jf-1)*nci+i], ycL = m.yc[(jf-1)*nci+i];
+                    double xcR = m.xc[jf*nci+i],     ycR = m.yc[jf*nci+i];
+                    double d2 = (xcR-xcL)*nx2 + (ycR-ycL)*ny2;
+                    if (std::abs(d2) < 1e-8) return 0.0;
+                    return (duR - duL) / d2;
+                };
+                double dudn_lo = (j > 0) ? dudn_at(j)   : vel_u(i,0) / std::max(d_wall, 1e-30);
+                double dudn_hi = (j+1 < ncj) ? dudn_at(j+1) : dudn_lo;
+                S_vort = std::abs(0.5 * (dudn_lo + dudn_hi));
+            }
+
+            // Modified vorticity: S̃ = S + ν̃ fv2 / (κ²d²)
+            double Stilde = S_vort + nutil * fv2_v / (SA_kappa*SA_kappa * d_wall*d_wall);
+            Stilde = std::max(Stilde, 0.3 * S_vort);  // Bradshaw limiter
+
+            // Production: P = cb1 * S̃ * ρν̃
+            double P = SA_cb1 * Stilde * Q;
+
+            // Destruction coefficient (semi-implicit: D = -D_coeff * Q)
+            // D_coeff = cw1 * fw * (ν̃/d²)  so that D = -D_coeff * Q
+            double r_sa    = std::min(nutil / std::max(Stilde*SA_kappa*SA_kappa*d_wall*d_wall, 1e-30), 10.0);
+            double D_coeff = SA_cw1 * sa_fw(r_sa) * (nutil / (d_wall*d_wall));
+
+            // R_sa gets production + convection + diffusion (handled above).
+            // Destruction is handled semi-implicitly in run():
+            //   SA_new = (SA_old + dt*R_sa) / (1 + dt*D_coeff)
+            R_sa[k] += P;
+            D_sa[k] += std::max(D_coeff, 0.0);
+        }
+    }
+}
+
 // ---- run loop (SSP-RK3 + local time stepping) --------------------------------
 // Same formulation as euler2d/src/Solver.cpp but with bridge-cell aware R.
 
 void Solver::run() {
     int N = nci * ncj;
     std::vector<double> R(4*N, 0.0);
-    std::vector<double> dt_cell(N, 0.0);
+    std::vector<double> R_sa(N, 0.0), D_sa(N, 0.0), dt_cell(N, 0.0);
     std::vector<double> Un(4*N, 0.0);
+    std::vector<double> SAn(N, 0.0);   // SA backup for RK3
+
+    bool do_sa = (reynolds > 0.0 && !sa_data.empty());
 
     int final_order = scheme_order;
     if (warmup_iters > 0 && scheme_order >= 2) {
@@ -505,6 +741,11 @@ void Solver::run() {
             for (int i = 0; i < nci; ++i)
                 for (int vv = 0; vv < 4; ++vv)
                     buf[vv*N + j*nci+i] = U(vv, i, j);
+    };
+    auto pack_sa = [&](std::vector<double>& buf) {
+        for (int j = 0; j < ncj; ++j)
+            for (int i = 0; i < nci; ++i)
+                buf[j*nci+i] = SA(i, j);
     };
 
     std::ofstream conv("output/convergence.dat");
@@ -524,10 +765,12 @@ void Solver::run() {
         muscl_factor = (scheme_order >= 2 && iter > warmup_iters) ? 1.0 : 0.0;
 
         pack_real(Un);
+        if (do_sa) pack_sa(SAn);
 
         // ---- RK stage 1 ----
         apply_bc();
         compute_rhs(R, dt_cell);
+        if (do_sa) compute_sa_rhs(R_sa, D_sa, dt_cell);
 
         double res_rho = 0.0;
         for (int k = 0; k < N; ++k) res_rho += R[k] * R[k];
@@ -539,7 +782,7 @@ void Solver::run() {
         if (iter % output_interval == 0 || iter <= 2 || iter == warmup_iters + 1)
             std::cout << "iter " << std::setw(6) << iter
                       << "  res=" << res_rho
-                      << "  res/res0=" << res_norm << "\n";
+                      << "  res/res0=" << res_norm << "\n" << std::flush;
 
         for (int j = 0; j < ncj; ++j)
             for (int i = 0; i < nci; ++i)
@@ -553,8 +796,7 @@ void Solver::run() {
         for (int j = 0; j < ncj; ++j)
             for (int i = 0; i < nci; ++i)
                 for (int vv = 0; vv < 4; ++vv) {
-                    double u1 = U(vv,i,j);
-                    double un = Un[vv*N + j*nci+i];
+                    double u1 = U(vv,i,j), un = Un[vv*N + j*nci+i];
                     U(vv,i,j) = 0.75*un + 0.25*(u1 + dt_cell[j*nci+i]*R[vv*N + j*nci+i]);
                 }
 
@@ -565,10 +807,27 @@ void Solver::run() {
         for (int j = 0; j < ncj; ++j)
             for (int i = 0; i < nci; ++i)
                 for (int vv = 0; vv < 4; ++vv) {
-                    double u2 = U(vv,i,j);
-                    double un = Un[vv*N + j*nci+i];
+                    double u2 = U(vv,i,j), un = Un[vv*N + j*nci+i];
                     U(vv,i,j) = (1.0/3.0)*un + (2.0/3.0)*(u2 + dt_cell[j*nci+i]*R[vv*N + j*nci+i]);
                 }
+
+        // ---- SA: forward Euler + semi-implicit destruction (lagged from NS) ----
+        // SA is frozen during NS warmup to avoid explosive transient on the initial
+        // uniform SA field (SA CFL > 1 at wall cells during stagnation-zone establish).
+        // After warmup the NS has established the BL; SA activates from uniform 3/Re.
+        if (do_sa && iter > warmup_iters) {
+            apply_bc();
+            compute_sa_rhs(R_sa, D_sa, dt_cell);
+            for (int j = 0; j < ncj; ++j)
+                for (int i = 0; i < nci; ++i) {
+                    int k = j*nci+i;
+                    double dt = dt_cell[k];
+                    double denom = 1.0 + dt * D_sa[k];
+                    SA(i,j) = std::max(0.0, (SAn[k] + dt*R_sa[k]) / denom);
+                }
+        }
+
+        if (!std::isfinite(res_rho)) break;
 
         bool last = (res_norm < residual_drop) || (iter == max_iter);
         if (iter % output_interval == 0 || last) {

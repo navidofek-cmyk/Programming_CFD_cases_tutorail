@@ -278,6 +278,39 @@ void Mesh::generate(const MeshConfig& cfg) {
     build_outer_boundary(*this, cfg);
     tfi_fill(*this, cfg);
     compute_metrics();
+
+    // Pre-compute wall-normal distance for each cell.
+    // For airfoil cells (i in [i_TEl, i_TEu)): project cell centre onto the
+    // j=0 wall face (node midpoint) along the j=0 face normal.  This gives the
+    // true wall-normal distance on a structured RANS mesh (h1/2 for j=0,
+    // h1+h2/2 for j=1, etc.) rather than Euclidean distance to nearest wall
+    // node (which is dominated by surface arc spacing on fine RANS meshes).
+    // For non-airfoil cells: fall back to nearest-node Euclidean distance.
+    int nci = nc_i(), ncj = nc_j();
+    wall_dist.resize(nci * ncj, 0.0);
+    for (int j = 0; j < ncj; ++j) {
+        for (int i = 0; i < nci; ++i) {
+            double cx = xc[j*nci+i], cy = yc[j*nci+i];
+            if (i >= i_TEl && i < i_TEu) {
+                // Airfoil cell: project onto wall face normal
+                double xw = 0.5*(node_x(i,0)+node_x(i+1,0));
+                double yw = 0.5*(node_y(i,0)+node_y(i+1,0));
+                double nx = jfnx[0*nci+i], ny = jfny[0*nci+i];
+                double d  = (cx-xw)*nx + (cy-yw)*ny;
+                wall_dist[j*nci+i] = std::max(d, 1e-30);
+            } else {
+                // Wake/inlet cells: nearest wall node
+                double dmin2 = 1e30;
+                for (int k = i_TEl; k <= i_TEu; ++k) {
+                    double dx = cx - node_x(k,0);
+                    double dy = cy - node_y(k,0);
+                    double d2 = dx*dx + dy*dy;
+                    if (d2 < dmin2) dmin2 = d2;
+                }
+                wall_dist[j*nci+i] = std::sqrt(dmin2);
+            }
+        }
+    }
 }
 
 // ---- write_tecplot ----------------------------------------------------------
